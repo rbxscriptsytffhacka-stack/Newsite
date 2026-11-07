@@ -341,8 +341,13 @@
             </div>
 
             <button class="publish-btn" onclick="adicionarPost()">Publicar no Mural</button>
+            <div class="file-options" style="margin-top:15px;">
+                <label>🔑 Token do GitHub (publica para todos)</label>
+                <input type="password" id="token-gh" placeholder="Cole o token aqui (fica só neste celular)">
+                <button type="button" class="galeria-btn" style="margin-bottom:0;" onclick="salvarToken()">Salvar token</button>
+            </div>
             <div class="backup-row">
-                <button type="button" onclick="exportarBackup()">💾 Exportar backup</button>
+                <button type="button" onclick="exportarBackup()">💾 Exportar posts.json</button>
                 <button type="button" onclick="document.getElementById('backup-file').click()">📥 Importar backup</button>
                 <input type="file" id="backup-file" accept=".json" style="display:none;" onchange="importarBackup(event)">
             </div>
@@ -388,6 +393,8 @@
         /* ================= CONFIG ================= */
         const NOME_DONO = "Gabriel rbx";
         const SENHA_DONO = "2712cg";
+        const GH_USER = "rbxscriptsytffhacka-stack";
+        const GH_REPO = "Newsite";
 
         let isLogado = false;
         let usuarioAtual = null;
@@ -685,7 +692,7 @@
             if (usuarioAtual) {
                 const q = termoPesquisa.trim();
                 postsFiltrados = postsFiltrados.filter(s =>
-                    (categoriaAtual === 'Todas' || s.categoria === categoriaAtual) &&
+                    (categoriaAtual === 'Todas' || (s.categoria || 'Outros') === categoriaAtual) &&
                     (q === "" || s.titulo.toLowerCase().includes(q) || (s.desc || "").toLowerCase().includes(q))
                 );
                 const media = p => { const r = bancoDeAvaliacoes.filter(a => a.postId === p.id); return r.length ? r.reduce((t, a) => t + a.nota, 0) / r.length : 0; };
@@ -881,6 +888,7 @@
                 bancoDeScripts.shift();
                 return;
             }
+            sincronizarGitHub();
 
             document.getElementById('titulo-input').value = '';
             document.getElementById('desc-input').value = '';
@@ -906,14 +914,14 @@ function editarPost(index) {
             p.linkArquivo = l.trim() && !/^https?:\/\//i.test(l.trim()) ? 'https://' + l.trim() : l.trim();
             salvarLocal('meusPosts', bancoDeScripts);
             renderizarScripts();
-            toast("✏️ Post atualizado!");
+            sincronizarGitHub();
         }
 
         function exportarBackup() {
             const dados = { posts: bancoDeScripts, avaliacoes: bancoDeAvaliacoes, downloads };
             const a = document.createElement('a');
             a.href = URL.createObjectURL(new Blob([JSON.stringify(dados)], { type: 'application/json' }));
-            a.download = 'rbx-files-backup.json';
+            a.download = 'posts.json';
             a.click();
             URL.revokeObjectURL(a.href);
         }
@@ -951,6 +959,7 @@ function editarPost(index) {
 
                 bancoDeScripts.splice(index, 1);
                 salvarLocal('meusPosts', bancoDeScripts);
+                sincronizarGitHub();
                 renderizarScripts();
 
                 const aviso = document.createElement('div');
@@ -1047,7 +1056,73 @@ function editarPost(index) {
             }
             atualizarUIUsuario();
             renderizarScripts();
+            carregarPostsPublicos();
         })();
+
+        /* ================= POSTS PÚBLICOS (posts.json) ================= */
+        function tokenGH() { return localStorage.getItem('ghTokenRBX') || ""; }
+
+        function salvarToken() {
+            const t = document.getElementById('token-gh').value.trim();
+            if (!t) { toast("Cole o token primeiro."); return; }
+            localStorage.setItem('ghTokenRBX', t);
+            document.getElementById('token-gh').value = '';
+            toast("🔑 Token salvo neste celular!");
+        }
+
+        async function sincronizarGitHub() {
+            const token = tokenGH();
+            if (!token) { toast("⚠️ Salvo só neste celular. Salve o token do GitHub no painel para publicar para todos."); return; }
+            const url = `https://api.github.com/repos/${GH_USER}/${GH_REPO}/contents/posts.json`;
+            const headers = { Authorization: 'Bearer ' + token, Accept: 'application/vnd.github+json' };
+            try {
+                toast("⏳ Publicando para todos...");
+                let sha;
+                const g = await fetch(url, { headers, cache: 'no-store' });
+                if (g.ok) sha = (await g.json()).sha;
+                else if (g.status !== 404) throw new Error(g.status);
+                const conteudo = btoa(unescape(encodeURIComponent(JSON.stringify(bancoDeScripts))));
+                const p = await fetch(url, { method: 'PUT', headers, body: JSON.stringify({ message: 'Atualiza posts', content: conteudo, sha }) });
+                if (!p.ok) throw new Error(p.status);
+                toast("✅ Publicado! Aparece para todos em ~1 minuto.");
+            } catch (e) {
+                toast("❌ Erro ao publicar (" + e.message + "). Confira o token.");
+            }
+        }
+
+        function carregarPostsPublicos() {
+            const token = tokenGH();
+            if (token) {
+                fetch(`https://api.github.com/repos/${GH_USER}/${GH_REPO}/contents/posts.json`, {
+                    headers: { Authorization: 'Bearer ' + token, Accept: 'application/vnd.github.raw+json' }, cache: 'no-store'
+                })
+                    .then(r => r.ok ? r.json() : null)
+                    .then(d => {
+                        const lista = Array.isArray(d) ? d : (d && d.posts);
+                        if (!Array.isArray(lista)) return;
+                        bancoDeScripts = lista;
+                        salvarLocal('meusPosts', bancoDeScripts);
+                        renderizarScripts();
+                    })
+                    .catch(() => {});
+                return;
+            }
+            carregarPostsPagina();
+        }
+
+        function carregarPostsPagina() {
+            fetch('posts.json?v=' + Date.now())
+                .then(r => r.ok ? r.json() : null)
+                .then(d => {
+                    const lista = Array.isArray(d) ? d : (d && d.posts);
+                    if (!Array.isArray(lista)) return;
+                    const ids = new Set(lista.map(p => p.id));
+                    const soLocais = bancoDeScripts.filter(p => !ids.has(p.id));
+                    bancoDeScripts = lista.concat(soLocais);
+                    renderizarScripts();
+                })
+                .catch(() => {});
+        }
     </script>
 </body>
 </html>
